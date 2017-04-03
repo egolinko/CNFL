@@ -1,0 +1,502 @@
+---
+title: "lwcd-lwcd"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# load libraries
+
+```{r, echo=TRUE, results='hide', warning=FALSE, message=FALSE}
+library(easypackages)
+suppressWarnings(
+  libraries("knitr","e1071","dplyr","Rcpp","randomForest","readr","quanteda","RcppArmadillo","RcppEigen","parallel","RSpectra","pryr","C50","nnet","mclust","kernlab","NMI","cluster","kknn")
+)
+
+```
+
+# Datasets
+
+```{r, echo=TRUE, results='hide', warning=FALSE, message=FALSE}
+aws.directory <- "https://s3-us-west-2.amazonaws.com/researchs/learn_w_cat_data/"
+
+car <- read.csv(paste(aws.directory, "car.csv", sep = ""))
+hiv <- read.csv(paste(aws.directory, "hiv_impens.csv", sep = ""))
+nursery <- read.csv(paste(aws.directory, "nursery.csv", sep = ""))
+spect <- read.csv(paste(aws.directory, "spect.csv", sep = ""))
+splice <- read.csv(paste(aws.directory, "splice.csv", sep = ""))
+
+balance <- read.table("https://archive.ics.uci.edu/ml/machine-learning-databases/balance-scale/balance-scale.data",sep = ",")
+names(balance) <- c('Class', names(balance)[-1])
+
+hayes <- read.table("https://archive.ics.uci.edu/ml/machine-learning-databases/hayes-roth/hayes-roth.data", sep = ",")
+hayes <- hayes[,-1]
+names(hayes) <- c(names(hayes)[-1], 'Class')
+
+tictac <- read.table("https://archive.ics.uci.edu/ml/machine-learning-databases/tic-tac-toe/tic-tac-toe.data", sep = ",")
+names(tictac) <- c(names(tictac)[-length(names(tictac))], 'Class')
+
+education_kag <- read.csv(paste(aws.directory, "xAPI-Edu-Data.csv", sep = ""))
+
+l_cnae <- read.table('http://archive.ics.uci.edu/ml/machine-learning-databases/00233/CNAE-9.data', sep = ',')
+names(l_cnae) <- c('Class', setdiff(names(l_cnae), 'V1'))
+cnae <- as.data.frame(tfidf(as.dfm(dplyr::select(l_cnae,- Class))))
+cnae$Class <- as.factor(l_cnae$Class)
+  
+a_amazon <- read_delim(paste(aws.directory, 'amazon_cells_labelled.txt', sep = ""), delim = '\t', col_names = FALSE)
+amazon <- as.data.frame(dfm_trim(tfidf(dfm(quanteda::tokenize(as.character(a_amazon$X1),  what = 'word', removeNumbers = TRUE, removePunct = TRUE),
+                                           tolower = TRUE, remove = stopwords('english')))))
+amazon$Class <- as.factor(a_amazon$X2)
+
+l_fifty_fifty <- read_delim(paste(aws.directory, 'fifty_fifty.csv', sep = ""), delim = ',')
+fifty_fifty <- as.data.frame(tfidf(as.dfm(dplyr::select(l_fifty_fifty,- Class))))
+fifty_fifty$Class <- as.factor(l_fifty_fifty$Class)
+
+RCV1 <- as.data.frame(read_delim(paste(aws.directory, 'RCV1-EN.csv', sep = ""), delim = ',', col_names = TRUE))
+names(RCV1) <- make.names(names(RCV1))
+RCV1$Class <- as.factor(RCV1$Class)
+
+bbc <- read_delim(paste(aws.directory, 'bbc.csv', sep = ""), delim = ',', col_names = TRUE)
+
+twenty_twenty <- read_delim(paste(aws.directory,'reuters_20.csv',sep=''), delim = ',')
+
+cortex <- read_delim(paste(aws.directory,'Data_Cortex_Nuclear.csv',sep=''), delim = ',')
+
+forest <- read_delim(paste(aws.directory,'forest_types.csv',sep=''), delim = ',')
+
+turkiye <- read.csv(paste(aws.directory,'turkiye-student-evaluation_generic.csv',sep=''))
+
+urban <- read.csv(paste(aws.directory,'urban_land_cover.csv',sep=''))
+
+soybean <- read.csv(paste(aws.directory,'soybean-large.csv',sep=''))
+  
+promoters <- read.csv(paste(aws.directory,'promoters.csv',sep=''))
+```
+
+# C++ optimizations
+
+```{r, echo=TRUE}
+cppFunction('NumericMatrix by_rowC(CharacterMatrix A){
+            int nrows = A.nrow(), ncols = A.ncol();
+            NumericMatrix tot(nrows, ncols);
+            NumericMatrix out(nrows);
+            
+            for (int i = 0; i < nrows; i++) {
+              for (int j = 0; j <= i; j++) {
+                tot.row(j) = A.row(i) == A.row(j);
+                out(i,j) += sum(tot.row(j));
+                out(j,i) = out(i,j);
+            }
+          }
+        return out/ncols;}')
+
+matrix_mult.cpp <- "
+// [[Rcpp::depends(RcppArmadillo, RcppEigen)]]
+
+#include <RcppArmadillo.h>
+#include <RcppEigen.h>
+
+// [[Rcpp::export]]
+SEXP eigenMapMatMult(const Eigen::Map<Eigen::MatrixXd> A, Eigen::Map<Eigen::MatrixXd> B){
+    Eigen::MatrixXd C = A * B;
+
+    return Rcpp::wrap(C);
+}
+"
+
+sourceCpp(code = matrix_mult.cpp)
+```
+
+# lwcd
+
+```{r, echo=TRUE}
+htlfcd <- function(source.data){
+  
+  x_hat <- sapply(source.data, as.character)
+  
+  S <- by_rowC(x_hat) 
+  
+  V <- suppressWarnings(eigs(S, nrow(source.data))$vectors)
+  
+  s_hat <- eigenMapMatMult(S, V)
+  
+  return(s_hat)}
+```
+
+# Cross-validation indicies
+
+```{r, echo=TRUE}
+CV <- function(dataset, folds, repeats = 1){
+
+  createTrainTest <- function(repeats){
+  set.seed(314)
+    test.indx <- lapply(1:folds, function(i) 
+      sample(1:nrow(dataset), (1/folds) * nrow(dataset)))
+    
+    train.indx <- lapply(1:folds, function(i) 
+      setdiff(1:nrow(dataset), test.indx[[i]]))
+    
+    names(train.indx) <- do.call('c', lapply(1:folds, function(i) paste('fold_',i,sep = '')))
+    names(test.indx) <- do.call('c', lapply(1:folds, function(i) paste('fold_',i,sep = '')))
+    
+    fold.sets <- list(train.indx, test.indx)
+    names(fold.sets) <- c('train', 'test')
+    
+  return(fold.sets)}
+
+  train.test <- lapply(1:repeats, function(i) createTrainTest(i))  
+  names(train.test) <- do.call('c', lapply(1:repeats, function(i) paste('set_',i,sep = '')))
+
+return(train.test)}
+```
+
+# Categorical data
+
+```{r, echo=TRUE}
+CreateSampleCategorical <- function(dataset, is_baseline = FALSE){
+  
+  if(is_baseline == TRUE){
+    data.sample <- dataset
+    names(data.sample) <- make.names(names(data.sample))
+  }
+  else{
+    data.sample <- as.data.frame(htlfcd(dplyr::select(dataset, -Class)))
+    data.sample$Class <- dataset$Class
+    names(data.sample) <- make.names(names(data.sample))
+  }
+  
+  return(data.sample)
+}
+```
+
+# Text data
+
+```{r, echo=TRUE}
+CreateSampleText <- function(dataset, num_bins, is_baseline = FALSE){
+ 
+  if(is_baseline == TRUE){
+    data.sample <- dataset
+    names(data.sample) <- make.names(names(data.sample))
+  }
+  else{
+    dataset.bin <- mutate_each(dplyr::select(dataset,-Class), funs(ntile(.,num_bins)))
+    data.sample <- as.data.frame(htlfcd(dataset.bin))
+    data.sample$Class <- dataset$Class
+    names(data.sample) <- make.names(names(data.sample))
+  }
+  
+  return(data.sample)
+}
+```
+
+# Experiments
+
+```{r}
+Experiments <- function(dataset_name, num_bins = 5, folds = 5, repeats = 1, learner, is_baseline = FALSE, isText = FALSE){
+
+  dataset <- eval(parse(text = dataset_name))
+  
+  if(isText == TRUE){
+    s_init <- CreateSampleText(dataset, num_bins, is_baseline)
+  }
+  else{
+    s_init <- CreateSampleCategorical(dataset, is_baseline)
+  }
+  
+  indx <- CV(dataset, folds, repeats)
+
+  ByLearner <- function(learner, k){
+    t1 <- Sys.time()
+    print(t1)
+    s <- data.frame(dplyr::select(s_init,-Class)[,1:k], s_init$Class)
+    names(s) <- c(paste('X', 1:k, sep = ""), 'Class')
+    
+    if(learner == 'knn1' | learner == 'nnet'){
+      if(learner == 'knn1'){
+       learner_string <- "kknn(factor(Class) ~., train = s[indx[[i]]$train[[j]],], test = s[indx[[i]]$test[[j]],], k = 1)$fitted.values"
+      }
+      else{
+        learner_string <- "predict(nnet(factor(Class) ~., data = s[indx[[i]]$train[[j]],], size = 1, MaxNWts = 5000), 
+        dplyr::select(s[indx[[i]]$test[[j]],],-Class), type = 'class')"
+      }
+    }
+    else{
+      learner_string <- paste("predict(",
+                          learner,"(factor(Class) ~., s[indx[[i]]$train[[j]],]),
+                          dplyr::select(s[indx[[i]]$test[[j]],], -Class))", sep = "")
+    }
+    p <- eval(parse(text = paste("
+                lapply(1:repeats, function(i) 
+                  do.call('c', 
+                lapply(1:folds, function(j) 
+                          sum(diag(table("
+                          ,learner_string,
+                          ",s[indx[[i]]$test[[j]],]$Class)))/length(indx[[i]]$test[[j]]))))",
+                  sep = "")      
+                )
+              )
+      print(paste(learner,' took ', Sys.time()- t1, sep = ''))
+      df <- as.data.frame(do.call('c', p))
+      names(df) <- paste("learner",learner, sep = "_")
+      return(df)
+    }
+
+  
+  results <- as.data.frame(do.call(cbind,
+                    mclapply(1:100, 
+                    partial(ByLearner, learner = learner),
+                    mc.cores = detectCores() - 2)
+  ))
+  names(results) <- paste('X', 1:100, sep = '')
+  write.csv(results, paste(getwd(), "/", dataset_name, "_", learner, ".csv", sep = ''), row.names = F)
+  return(results)
+
+  print(paste(dataset_name, Sys.time(),sep = '-'))
+gc()  
+}
+  
+```  
+
+```{r}
+
+categorical_datasets <- c('balance','car','cnae','education_kag', 'hayes','hiv','nursery','spect','splice','tictac','turkiye','soybean','promoters')
+binned_datasets <- c(
+  'amazon', 
+  'bbc', 'cortex', 'fifty_fifty', 'forest','RCV1','twenty_twenty','urban')
+
+```
+
+```{r}
+
+CatOut <- function(learner, list_item){
+  print(Sys.time())
+  l <- lapply(1:length(list_item), function(i) Experiments(dataset_name = list_item[i],folds = 5,
+                                                      repeats = 5,learner = learner))
+  print(Sys.time())
+  return(l)
+}
+
+#CatOut(learner = 'randomForest',list_item = categorical_datasets)
+#CatOut(learner = 'svm',list_item = categorical_datasets)
+#CatOut(learner = 'naiveBayes',list_item = categorical_datasets)
+#CatOut(learner = 'C5.0',list_item = categorical_datasets)
+#CatOut(learner = 'knn1',list_item = categorical_datasets)
+#CatOut(learner = 'nnet',list_item = categorical_datasets)
+```
+
+```{r}
+
+BinOut <- function(learner, list_item){
+  print(Sys.time())
+  l <- lapply(1:length(list_item), function(i) Experiments(dataset_name = list_item[i],folds = 5,
+                                                      repeats = 5,learner = learner,num_bins = 5,isText = TRUE))
+  print(Sys.time())
+  return(l)
+}
+
+#BinOut(learner = 'randomForest',list_item = binned_datasets)
+#BinOut(learner = 'svm',list_item = binned_datasets)
+#BinOut(learner = 'naiveBayes',list_item = binned_datasets)
+#BinOut(learner = 'C5.0',list_item = binned_datasets)
+#BinOut(learner = 'knn1',list_item = binned_datasets)
+#BinOut(learner = 'nnet',list_item = binned_datasets)
+```
+
+# Create Baselines
+
+```{r}
+
+Baselines <- function(dataset_name, folds = 5, repeats = 5, learner, is_baseline = FALSE, isText = FALSE){
+
+  dataset <- eval(parse(text = dataset_name))
+  
+  if(isText == TRUE){
+    s_init <- CreateSampleText(dataset, num_bins, is_baseline)
+  }
+  else{
+    s_init <- CreateSampleCategorical(dataset, is_baseline)
+  }
+  
+  s <- data.frame(dplyr::select(s_init,-Class), s_init$Class)
+  names(s) <- c(paste('X',1:(ncol(s_init)-1), sep = ""), 'Class')
+  indx <- CV(dataset, folds, repeats)
+
+  t1 <- Sys.time()
+  print(t1)
+  if(learner == 'knn1' | learner == 'nnet'){
+    if(learner == 'knn1'){
+      learner_string <- "kknn(factor(Class) ~., train = s[indx[[i]]$train[[j]],], test = s[indx[[i]]$test[[j]],], k = 1)$fitted.values"
+    }
+    else{
+      learner_string <- "predict(nnet(factor(Class) ~., data = s[indx[[i]]$train[[j]],], size = 1, MaxNWts = 5000), 
+      dplyr::select(s[indx[[i]]$test[[j]],],-Class), type = 'class')"
+    }
+  }
+  else{
+    learner_string <- paste("predict(",
+                          learner,"(factor(Class) ~., s[indx[[i]]$train[[j]],]),
+                          dplyr::select(s[indx[[i]]$test[[j]],], -Class))", sep = "")
+  }
+    p <- eval(parse(text = paste("
+                lapply(1:repeats, function(i) 
+                  do.call('c', 
+                lapply(1:folds, function(j) 
+                          sum(diag(table("
+                          ,learner_string,
+                          ",s[indx[[i]]$test[[j]],]$Class)))/length(indx[[i]]$test[[j]]))))",
+                  sep = "")      
+                )
+              )
+      print(paste(learner,' took ', Sys.time()- t1, sep = ''))
+      df <- as.data.frame(do.call('c', p))
+      names(df) <- paste("learner",learner, sep = "_")
+      write.csv(df, paste(getwd(), "/baseline_", dataset_name, "_", learner, ".csv", sep = ''), row.names = F)
+      return(df)
+  }
+  
+```
+
+# Run baselines
+
+```{r}
+
+b_CatOut <- function(learner, list_item){
+  print(Sys.time())
+  l <- lapply(1:length(list_item), function(i) Baselines(dataset_name = list_item[i],folds = 5,
+                                                      repeats = 5,learner = learner, is_baseline = TRUE))
+  print(Sys.time())
+  return(l)
+}
+
+#b_CatOut(learner = 'randomForest',list_item = categorical_datasets)
+#b_CatOut(learner = 'svm',list_item = categorical_datasets)
+#b_CatOut(learner = 'naiveBayes',list_item = categorical_datasets)
+#b_CatOut(learner = 'C5.0',list_item = categorical_datasets)
+#b_CatOut(learner = 'knn1',list_item = categorical_datasets)
+#b_CatOut(learner = 'nnet',list_item = categorical_datasets)
+```
+
+# Baseline text
+
+```{r}
+
+b_BinOut <- function(learner, list_item){
+  print(Sys.time())
+  l <- lapply(1:length(list_item), function(i) Baselines(dataset_name = list_item[i],folds = 5,
+                                                      repeats = 5,learner = learner,isText = TRUE,is_baseline = TRUE))
+  print(Sys.time())
+  return(l)
+}
+
+#b_BinOut(learner = 'randomForest',list_item = binned_datasets)
+#b_BinOut(learner = 'svm',list_item = binned_datasets)
+#b_BinOut(learner = 'naiveBayes',list_item = binned_datasets)
+#b_BinOut(learner = 'C5.0',list_item = binned_datasets)
+#b_CatOut(learner = 'knn1',list_item = binned_datasets)
+#b_CatOut(learner = 'nnet',list_item = binned_datasets)
+```
+
+#Cluster methods
+
+```{r}
+
+ClusterMethod <- function(dataset_name, num_bins = 5, is_baseline = FALSE, isText = FALSE, num_eigen = 20, fake_iter){
+  
+  dataset <- eval(parse(text = dataset_name))
+  
+  if(is_baseline == TRUE & isText == TRUE){
+    s_init <- CreateSampleText(dataset, num_bins, is_baseline = TRUE)
+  }
+  else if(is_baseline == TRUE & isText == FALSE){
+    l_s_init <- CreateSampleCategorical(dataset, is_baseline = TRUE)
+    s_init <- as.data.frame(do.call(cbind, lapply(1:(ncol(l_s_init)-1), function(i) model.matrix(~l_s_init[,i])[,-1])))
+    names(s_init) <- paste('X',1:ncol(s_init),sep='')
+    s_init$Class <- as.factor(l_s_init$Class)
+  }
+  else if(is_baseline == FALSE & isText == FALSE){
+    s_init <- CreateSampleCategorical(dataset, is_baseline)
+    s_init <- data.frame(dplyr::select(s_init,-Class)[,1:num_eigen], s_init$Class)
+    names(s_init) <- c(paste('X',1:num_eigen,sep = ''),'Class')
+  }
+  else{
+    s_init <- CreateSampleText(dataset, num_bins = 5, is_baseline)
+    s_init <- data.frame(dplyr::select(s_init,-Class)[,1:num_eigen], s_init$Class)
+    names(s_init) <- c(paste('X',1:num_eigen,sep = ''),'Class')
+  }
+  
+  print(paste(Sys.time(), 'started dist',sep = " "))
+  x_s_init <- dist(dplyr::select(s_init,-Class), method = 'euclidean')
+  print(paste(Sys.time(), 'ended dist',sep = " "))
+  
+  ClusterPurity <- function(clusters, classes) {
+     sum(apply(table(classes, clusters), 2, max)) / length(clusters)
+  }
+  
+  clustering_outcomes <- function(fake_iter, is_baseline = FALSE){
+    
+    index_set <- 1:nrow(s_init)
+    
+    pam_x <- pam(x_s_init, k = n_distinct(s_init$Class), cluster.only = TRUE)
+    
+    pam_out <- c(as.numeric(NMI(data.frame(i = index_set, factor(pam_x)), 
+                                          data.frame(i = index_set, factor(s_init$Class)))), ClusterPurity(factor(pam_x), factor(s_init$Class))) 
+    
+    
+    kmeans_out <- function(i){
+      kmea <- kmeans(x_s_init, centers = n_distinct(s_init$Class))$cluster
+      return(c(round(as.numeric(NMI(data.frame(i = index_set , factor(kmea)), 
+                           data.frame(i = index_set, factor(s_init$Class)))),5),
+             ClusterPurity(factor(kmea), factor(s_init$Class))))
+    }
+    
+    kmm_o <- do.call(rbind, lapply(1:fake_iter, function(i) kmeans_out(i)))
+    
+    hclust_x <- hclust(x_s_init)
+    
+    hclust_out <- c(as.numeric(NMI(data.frame(i = index_set, factor(cutree(hclust_x, n_distinct(s_init$Class)))), 
+                                          data.frame(i = index_set, factor(s_init$Class)))), ClusterPurity(factor(cutree(hclust_x, n_distinct(s_init$Class))), factor(s_init$Class)))
+    
+    nmi <- data.frame(rbind(kmm_o, pam_out, hclust_out), row.names = NULL)
+    names(nmi) <- c('NMI','purity')
+    nmi$alg <- c(rep('kmeans', fake_iter),'pam','hclust')
+    
+    print(paste(Sys.time(), ' for ', dataset_name, sep=''))  
+    return(nmi)    
+  }
+  
+  ret <- clustering_outcomes(fake_iter, is_baseline = FALSE)
+  write.csv(ret, paste(getwd(), "/is_baseline_", is_baseline, "_" ,dataset_name,".csv", sep = ''), row.names = FALSE)
+  return(ret)
+}
+
+```
+
+#Run clusters
+
+```{r}
+#baselines
+for(i in 1:length(categorical_datasets)){
+  print(categorical_datasets[i])
+  ClusterMethod(dataset_name = categorical_datasets[i],is_baseline = TRUE,isText = FALSE,fake_iter = 10)
+}
+
+for(i in 1:length(binned_datasets)){
+  print(binned_datasets[i])
+  ClusterMethod(dataset_name = binned_datasets[i],is_baseline = TRUE,isText = TRUE,fake_iter = 10)
+}
+
+#propsosed
+for(i in 1:length(categorical_datasets)){
+  print(categorical_datasets[i])
+  ClusterMethod(dataset_name = categorical_datasets[i],is_baseline = FALSE,isText = FALSE,fake_iter = 10)
+}
+
+for(i in 1:length(binned_datasets)){
+  print(binned_datasets[i])
+  ClusterMethod(dataset_name = binned_datasets[i],is_baseline = FALSE,isText = TRUE,fake_iter = 10)
+}
+
+
+```
