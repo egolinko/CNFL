@@ -1,0 +1,502 @@
+---
+title: "CNFL results"
+output: 
+  html_document:
+  toc: true
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+The code below was used to generate the analysis surrounding the experiments of CNFL.
+
+```{r,message=FALSE,error=FALSE,warning=FALSE}
+
+library(dplyr)
+library(knitr)
+library(ggplot2)
+library(readr)
+library(quanteda)
+library(DT)
+library(reshape2)
+library(tidyr)
+```
+
+#Datasets
+
+```{r,message=FALSE,error=FALSE,warning=FALSE}
+
+aws.directory <- "https://s3-us-west-2.amazonaws.com/researchs/learn_w_cat_data/"
+
+car <- read.csv(paste(aws.directory, "car.csv", sep = ""))
+hiv <- read.csv(paste(aws.directory, "hiv_impens.csv", sep = ""))
+nursery <- read.csv(paste(aws.directory, "nursery.csv", sep = ""))
+spect <- read.csv(paste(aws.directory, "spect.csv", sep = ""))
+splice <- read.csv(paste(aws.directory, "splice.csv", sep = ""))
+
+balance <- read.table("https://archive.ics.uci.edu/ml/machine-learning-databases/balance-scale/balance-scale.data",sep = ",")
+names(balance) <- c('Class', names(balance)[-1])
+
+hayes <- read.table("https://archive.ics.uci.edu/ml/machine-learning-databases/hayes-roth/hayes-roth.data", sep = ",")
+hayes <- hayes[,-1]
+names(hayes) <- c(names(hayes)[-1], 'Class')
+
+tictac <- read.table("https://archive.ics.uci.edu/ml/machine-learning-databases/tic-tac-toe/tic-tac-toe.data", sep = ",")
+names(tictac) <- c(names(tictac)[-length(names(tictac))], 'Class')
+
+education_kag <- read.csv(paste(aws.directory, "xAPI-Edu-Data.csv", sep = ""))
+
+l_cnae <- read.table('http://archive.ics.uci.edu/ml/machine-learning-databases/00233/CNAE-9.data', sep = ',')
+names(l_cnae) <- c('Class', setdiff(names(l_cnae), 'V1'))
+cnae <- as.data.frame(tfidf(as.dfm(dplyr::select(l_cnae,- Class))))
+cnae$Class <- as.factor(l_cnae$Class)
+  
+a_amazon <- read_delim(paste(aws.directory, 'amazon_cells_labelled.txt', sep = ""), delim = '\t', col_names = FALSE)
+amazon <- as.data.frame(dfm_trim(tfidf(dfm(quanteda::tokenize(as.character(a_amazon$X1),  what = 'word', removeNumbers = TRUE, removePunct = TRUE),
+                                           tolower = TRUE, remove = stopwords('english')))))
+amazon$Class <- as.factor(a_amazon$X2)
+
+l_fifty_fifty <- read_delim(paste(aws.directory, 'fifty_fifty.csv', sep = ""), delim = ',')
+fifty_fifty <- as.data.frame(tfidf(as.dfm(dplyr::select(l_fifty_fifty,- Class))))
+fifty_fifty$Class <- as.factor(l_fifty_fifty$Class)
+
+RCV1 <- as.data.frame(read_delim(paste(aws.directory, 'RCV1-EN.csv', sep = ""), delim = ',', col_names = TRUE))
+names(RCV1) <- make.names(names(RCV1))
+RCV1$Class <- as.factor(RCV1$Class)
+
+bbc <- read_delim(paste(aws.directory, 'bbc.csv', sep = ""), delim = ',', col_names = TRUE)
+
+twenty_twenty <- read_delim(paste(aws.directory,'reuters_20.csv',sep=''), delim = ',')
+
+cortex <- read_delim(paste(aws.directory,'Data_Cortex_Nuclear.csv',sep=''), delim = ',')
+
+forest <- read_delim(paste(aws.directory,'forest_types.csv',sep=''), delim = ',')
+
+turkiye <- read_delim(paste(aws.directory,'turkiye-student-evaluation_generic.csv',sep=''), delim = ',')
+
+urban <- read_delim(paste(aws.directory,'urban_land_cover.csv',sep=''), delim = ',')
+
+soybean <- read.csv(paste(aws.directory,'soybean-large.csv',sep=''))
+  
+promoters <- read.csv(paste(aws.directory,'promoters.csv',sep=''))
+
+```
+
+```{r}
+
+categorical_datasets <- c('balance','car','cnae','education_kag', 'hayes','hiv','nursery','spect','splice','tictac','turkiye','soybean','promoters')
+binned_datasets <- c(
+  'amazon', 
+  'bbc', 'cortex', 'fifty_fifty', 'forest','RCV1','twenty_twenty','urban')
+
+```
+
+#Dataset profile
+
+```{r}
+
+DataProfile <- function(dataset_name){
+  d <- eval(parse(text = dataset_name))
+  ret <- data.frame(dataset = dataset_name, n_instances = nrow(d), n_features = ncol(d)-1, n_classes = n_distinct(d$Class), 
+                    class_dist = paste(round(as.numeric(table(d$Class)/nrow(d)),4), collapse = ','))
+  return(ret)
+}
+
+data_profiles <- data.frame(rbind(do.call(rbind,Map(DataProfile, categorical_datasets)), 
+                            do.call(rbind,Map(DataProfile, binned_datasets))
+                            ),
+                            row.names = NULL)
+data_profiles$dataset <- as.factor(sapply(as.character(data_profiles$dataset), function(x) strsplit(x,"_")[[1]][1]))
+
+```
+
+
+#Create Baselines
+
+```{r}
+
+d <- '<your_path_to_baseline_outputs>'
+l_f <- list.files(d)
+
+ProcessBaseline <- function(k){
+  data_info <- strsplit(gsub('.csv',"",l_f[k]),"_")[[1]]
+  o <- read.csv(paste(d,l_f[k],sep = "/"))
+  names(o) <- 'X'
+  ret <- o %>% 
+    summarise(mean_acc = round(mean(X),4), sd = round(sd(X),4))
+  ret <- data.frame(type = data_info[1], dataset = data_info[2], learner = data_info[length(data_info)], ret)
+  return(ret)
+}
+
+baselines <- as.data.frame(do.call(rbind, lapply(1:length(l_f), function(i) ProcessBaseline(i))))
+baselines$learner <- recode(baselines$learner, knn1 = '1-NN', naiveBayes = 'NB', nnet = 'NNet', randomForest = 'RF', svm = 'SVM')
+```
+
+#LWCD summary
+
+```{r}
+
+h <- '<your_path_to_CNFL_outputs>'
+h_f <- list.files(h)
+
+Processh <- function(k){
+  data_info <- strsplit(gsub('.csv',"",h_f[k]),"_")[[1]]
+  o <- read.csv(paste(h, h_f[k],sep = "/"))
+  ret <- data.frame(type = rep('h', nrow(o)), dataset = data_info[1], learner = data_info[length(data_info)],
+                    mean_acc = round(as.numeric(colMeans(o)), 4), sd = round(as.numeric(apply(o,2,sd)),4), eigen = as.factor(seq(1:100)))
+  return(ret)
+}
+
+lwcd <- as.data.frame(do.call(rbind, lapply(1:length(h_f), function(i) Processh(i))))
+lwcd$learner <- recode(lwcd$learner, knn1 = '1-NN', naiveBayes = 'NB', nnet = 'NNet', randomForest = 'RF', svm = 'SVM')
+```
+
+#Compare baseline and h at 20 eigenv.
+
+```{r}
+
+# https://onlinecourses.science.psu.edu/stat200/node/60
+
+lj <- left_join(baselines[c('dataset','learner','mean_acc','sd')],
+          (lwcd %>% filter(eigen == 20))[c('dataset','learner','mean_acc','eigen','sd')], 
+          by = c('dataset', 'learner'))
+
+sp <- sqrt(((24*lj$sd.x^2)+(24*lj$sd.y^2))/(48))
+lj$t_stat <- (lj$mean_acc.x - lj$mean_acc.y)/(sp * sqrt((1/25)+(1/25)))
+lj$sig <- ifelse(lj$t_stat < -2.068, 'h', ifelse(lj$t_stat >= 2.068,'baseline','Tie'))
+lj <- left_join(lj, data_profiles[,-ncol(data_profiles)], on = 'dataset')
+lj$sig <- do.call('c',Map(function(x) ifelse(x == 'h','CNFL',x), lj$sig))
+lj$sig <- do.call('c',Map(function(x) ifelse(x == 'baseline','Baseline',x), lj$sig))
+datatable(lj[c('dataset','learner','mean_acc.x','mean_acc.y','sig','n_instances','n_features','n_classes')])
+table(lj$sig)
+```
+
+
+#Best at each
+
+```{r}
+
+best_b <- baselines %>%
+  group_by(dataset,learner) %>%
+  arrange(desc(mean_acc)) %>%
+  slice(1)
+
+best_h <- lwcd %>% 
+  group_by(dataset,learner) %>%
+  arrange(desc(mean_acc)) %>%
+  slice(1)
+
+best <- left_join(best_b[c('dataset','learner','mean_acc','sd')],
+          best_h[c('dataset','learner','mean_acc','eigen','sd')], 
+          by = c('dataset','learner'))
+b_sp <- sqrt(((24*best$sd.x^2)+(24*best$sd.y^2))/(48))
+best$t_stat <- (best$mean_acc.x - best$mean_acc.y)/(sp * sqrt((1/25)+(1/25)))
+best$sig <- ifelse(best$t_stat < -2.068, 'CNFL', ifelse(best$t_stat >= 2.068,'Baseline','Tie'))
+best$sig <- do.call('c',Map(function(x) ifelse(x == 'h','CNFL',x), best$sig))
+best$sig <- do.call('c',Map(function(x) ifelse(x == 'baseline','Baseline',x), best$sig))
+best <- left_join(best, data_profiles[,-ncol(data_profiles)], on = 'dataset')
+datatable(best[c('dataset','learner','mean_acc.x','mean_acc.y','eigen','sig','n_instances','n_features','n_classes')])
+table(best$sig)
+```
+
+
+#Create graphs
+
+```{r}
+
+G <- function(k){
+
+ggplot(lwcd %>% filter(dataset == unique(lwcd$dataset)[k]), 
+        aes(x = eigen, y = mean_acc)) + 
+     geom_line(aes(colour = learner, group = learner)) + 
+    theme_bw() + 
+  scale_color_brewer(palette="Set1")  +
+geom_hline(yintercept = (baselines %>% 
+                           filter(dataset == unique(lwcd$dataset)[k]))$mean_acc, 
+           aes(colour = learner, group = learner), col = c('#E41A1C','#377EB8','#4DAF4A','#984EA3','#FF7F00','#FFFF33'), linetype = 'dashed') +
+    geom_vline(xintercept = 20, linetype = 'dotted') +
+scale_x_discrete(breaks=c(0,seq(0,100,10))) +
+  # labs(title = unique(lwcd$dataset)[k], x = 'Number of eigenvectors' , y = 'Accuracy', color = 'Learner')
+    labs(x = 'Number of eigenvectors' , y = 'Accuracy', color = 'Learner') +
+    theme(text = element_text(size = 18))
+}
+
+```
+
+#Graph
+
+```{r,echo=FALSE}
+
+for(i in 1:n_distinct(lwcd$dataset))
+  plot(G(i))
+
+```
+
+#Cluster baselines
+
+```{r}
+
+cb <- function(is_a_baseline){
+  
+  if(is_a_baseline == 'baseline'){
+    cl_d <- '<your_path_to_cluster_baseline_outputs>'
+    baseline_value <- 'baseline'
+  }
+  else{
+    cl_d <- '<your_path_to_cluster_CNFL_outputs>'
+    baseline_value <- 'h'
+  }
+  cl_dl_f <- list.files(cl_d)
+
+  
+  cl_Process <- function(k){
+    data_info <- strsplit(gsub('.csv',"", cl_dl_f[k]),"_")[[1]]
+    o <- read.csv(paste(cl_d, cl_dl_f[k],sep = "/"))
+    ret <- o %>% 
+      group_by(alg) %>% 
+      summarise(mean_NMI = round(mean(NMI),5), mean_purity = round(mean(purity),5))
+    ret$dataset <- rep(last(strsplit(strsplit(cl_dl_f[k],".",fixed = TRUE)[[1]][1],"_")[[1]]), nrow(ret))
+    ret$type <- rep(baseline_value, nrow(ret))
+    return(ret)
+  }
+
+  cl_b <- as.data.frame(do.call(rbind, lapply(1:length(cl_dl_f), function(i) cl_Process(i))))
+return(cl_b)}
+```
+
+#Cluster compare
+
+```{r}
+b <- cb('baseline')
+h <- cb('h')
+y <- merge(b, h, by = c('alg','dataset'))
+y <- select(y,-c(type.x, type.y))
+names(y) <- c('Alg','dataset','NMI_base','purity_base','NMI_h','purity_h')
+y <- y %>% 
+  mutate(NMI = ifelse(NMI_base> NMI_h, 'baseline','h'), Purity = ifelse(purity_base > purity_h, 'baseline','h'))
+y <- y[c('Alg','dataset','NMI_base','NMI_h','purity_base','purity_h','NMI','Purity')]
+```
+
+#Cluster graphics for hclust
+
+```{r}
+
+cg <- rbind(b, h)
+ggplot(data = cg %>% filter(alg == 'hclust'), aes(x = dataset, y = mean_purity, fill = type)) + geom_bar(stat = "identity", position = 'dodge') + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+
+#Kmeans
+
+```{r}
+
+datatable(y %>% filter(Alg == 'kmeans'))
+```
+
+#Pam
+
+```{r}
+
+datatable(y %>% filter(Alg == 'pam'))
+```
+
+#Hclust
+
+```{r}
+
+datatable(y %>% filter(Alg == 'hclust'))
+```
+
+
+## for cnfl
+
+#hclust graphic
+```{r}
+
+hclust_graph_data <- rbind(b, h) %>% 
+  filter(alg == 'hclust') %>%
+  select(mean_purity,dataset,type) %>% 
+  mutate_all(function(x) ifelse(x == 'h','CNFL', ifelse(x == 'baseline','Baseline',x)))
+names(hclust_graph_data) <- c('purity','dataset','method')
+hclust_graph_data$dataset <- factor(hclust_graph_data$dataset, levels = sort(unique(hclust_graph_data$dataset), decreasing = T))
+
+hclust_graphic <- ggplot(data = hclust_graph_data, 
+       aes(x = dataset, y = purity, fill = method)) + 
+  geom_bar(stat = "identity", position = 'dodge') +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1)) + 
+  coord_flip() +
+  labs(x = 'Cluster Purity', y = 'Datasets', fill = 'Method') +
+  theme(text = element_text(size = 18)) 
+  
+
+```
+
+# head to head cluster
+```{r}
+
+hh <- rbind(b,h)[c('alg','mean_purity','dataset','type')]
+hhc <- hh %>% 
+  arrange(desc(mean_purity)) %>% 
+  group_by(alg,dataset) %>% 
+  summarise(win = first(type)) %>%
+  spread(alg, win)
+hhc <- hhc[c('dataset','kmeans','pam','hclust')]
+hhc <- hhc %>% 
+  mutate_all(function(x) ifelse(x == 'baseline','b',ifelse(x == 'h', 'p', x)))
+
+
+s_hhc <- as.data.frame(rbind(table(hhc$kmeans),table(hhc$pam), table(hhc$hclust)))
+s_hhc$learner <- c('kmeans','pam','hclust')
+
+```
+
+#20 eigenvectors
+```{r}
+
+twenty_e <- lj %>% 
+  select(dataset,learner,sig) %>% 
+  spread(learner, sig) %>%
+  mutate_all(function(x) ifelse(x == 'baseline','b',
+                                ifelse(x == 'h', 'p', 
+                                       ifelse(x == '-','tie',x))))
+twenty_e$dataset <- lj %>% 
+  select(dataset,learner, sig) %>% 
+  spread(learner, sig) %>% 
+  select(dataset)
+
+
+s_twenty_e <- data.frame(rbind(table(twenty_e$C5.0),table(twenty_e$`1-NN`),table(twenty_e$NB), table(twenty_e$NNet),  table(twenty_e$RF), table(twenty_e$SVM)))
+s_twenty_e$learners <- c('C5.0','1-NN', 'NB', 'NNet', 'RF', 'SVM')
+names(s_twenty_e) <- c('tie','b','p','learner')
+
+
+```
+
+#best for svm
+
+```{r}
+best_svm <- best %>% 
+  filter(learner == 'svm') %>% 
+  select(dataset, mean_acc.x, mean_acc.y, sig, eigen)
+best_svm <- best_svm[,-1]
+names(best_svm) <- c('dataset','baseline','propsosed','sig','eigen')
+
+```
+
+#total avg
+
+```{r}
+a <- lwcd %>% 
+  group_by(eigen) %>% 
+  summarise(acc = mean(mean_acc))
+
+t_avg <- ggplot(a, aes(x = as.numeric(as.character(eigen)), y = acc)) +
+  geom_line() +
+  geom_vline(xintercept = 20, linetype = 3) +
+  theme_bw() + 
+  labs(x = 'Number of eigenvectors', y = 'Accuracy') +
+  theme(text = element_text(size = 18)) 
+
+
+```
+
+#best performing
+
+```{r}
+
+overall_best <- best %>% 
+  select(dataset, learner, sig) %>% 
+  spread(learner, sig) %>%
+  mutate_all(function(x) ifelse(x == 'baseline','b',ifelse(x == 'h','p',x)))
+
+
+s_overall_best <- data.frame(rbind(table(overall_best$C5.0),table(overall_best$knn1),table(overall_best$naiveBayes), table(overall_best$nnet),  table(overall_best$randomForest), table(overall_best$svm)))
+s_overall_best$learners <- c('C5.0','knn1', 'naiveBayes', 'nnet', 'randomForest', 'svm')
+names(s_overall_best) <- c('tie','b','p','learner')
+
+
+```
+
+# dataset profile
+```{r}
+
+pr <- best %>% 
+  select(dataset, n_instances, n_features, n_classes)
+
+pr <- unique(pr[,-1])
+
+
+```
+
+
+# fifty graph point-style
+
+```{r}
+
+baseline_p <- seq(0,100,5)
+b_ <- as.data.frame(do.call(rbind, lapply(1:6, function(i) cbind(baselines %>% filter(dataset == 'fifty' & learner == unique(learner)[i]) %>% select(learner, mean_acc), baseline_p))))
+
+ggplot() + 
+     geom_point(data = lwcd %>% filter(dataset == 'fifty'), aes(x = eigen, y = mean_acc, shape = learner, group = learner)) + 
+     geom_line(data = lwcd %>% filter(dataset == 'fifty'), aes(x = eigen, y = mean_acc, group = learner))  +
+    theme_bw() + 
+geom_hline(yintercept = (baselines %>% 
+                           filter(dataset == 'fifty'))$mean_acc, 
+           aes(group = learner), linetype = 'dotted') +
+  geom_point(data = b_, aes(x = baseline_p, y = mean_acc, shape = learner, group = learner)) +
+    geom_vline(xintercept = 20, linetype = 'dotted') +
+scale_x_discrete(breaks=c(0, seq(0,100,10))) +
+  labs(x = 'Number of eigenvectors' , y = 'Accuracy', shape = 'Learner') +
+theme(text = element_text(size = 18)) 
+
+
+```
+
+# Fifty color and points
+
+```{r}
+
+
+baseline_p <- seq(0,100,5)
+b_ <- as.data.frame(do.call(rbind, lapply(1:6, function(i) cbind(baselines %>% filter(dataset == 'fifty' & learner == unique(learner)[i]) %>% select(learner, mean_acc), baseline_p))))
+
+ggplot() + 
+      geom_line(data = lwcd %>% filter(dataset == 'fifty'), aes(x = eigen, y = mean_acc, group = learner, colour = learner))  +
+  geom_point(data = lwcd %>% filter(dataset == 'fifty' & eigen %in% c(1,10,20,30,40,50,60,70,80,90)), 
+      aes(x = eigen, y = mean_acc, shape = learner, group = learner, colour = learner), size = 3) + 
+  scale_shape(solid = FALSE) +
+    theme_bw() + 
+geom_hline(yintercept = (baselines %>% 
+                           filter(dataset == 'fifty'))$mean_acc, 
+           aes(colour = learner, group = learner), linetype = 'dotted', col = c("#F8766D", "#B79F00", "#00BA38", "#00BFC4", "#619CFF", "#F564E3")) + 
+  geom_point(data = b_, aes(x = baseline_p, y = mean_acc, shape = learner, group = learner, colour = learner), size = 3) +
+    geom_vline(xintercept = 20, linetype = 'dotted') +
+scale_x_discrete(breaks=c(0, seq(0,100,10))) +
+  labs(x = 'Number of eigenvectors' , y = 'Accuracy', shape = 'Learner', colour = 'Learner') +
+theme(text = element_text(size = 18)) 
+
+
+```
+
+# head to head 20 and best
+
+```{r}
+
+ggplot() + 
+  geom_point(data = lj, aes(x = mean_acc.x, y = mean_acc.y, shape = learner, colour = sig)) + geom_abline(intercept = 0, linetype = 'dotted') +
+  theme_bw() + 
+  labs(x = 'Baseline methods', y = 'CNFL using 20 eigenvectors', colour = 'Significance',shape = 'Learner') + 
+  theme(text = element_text(size = 18)) 
+
+ 
+
+ggplot() + 
+  geom_point(data = best, aes(x = mean_acc.x, y = mean_acc.y, shape = learner, colour = sig)) + geom_abline(intercept = 0, linetype = 'dotted') +
+  theme_bw() + 
+  labs(x = 'Baseline methods', y = 'CNFL using best number of eigenvectors', colour = 'Significance', shape = 'Learner') +
+  theme(text = element_text(size = 18)) 
+ 
+```
